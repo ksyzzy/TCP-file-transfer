@@ -40,10 +40,10 @@ extern "C" {
 		int instruction, received;
 		FILE* file;
 		long fileLength, bytesRead, totalRead;
-		char buffer[BUFFER_SIZE+1];
+		char buffer[BUFFER_SIZE + 1];
 
 		/*Request for file list transfer*/
-		instruction = 1; 
+		instruction = 1;
 		instruction = htonl(instruction);
 
 		/*Send instruction to the server*/
@@ -53,7 +53,7 @@ extern "C" {
 		/*Wait for confirmation*/
 		recv(clientSocket, (char*)&received, sizeof(long), 0);
 		received = ntohl(received);
-		
+
 		switch (received) {
 		case 1:
 			printf("No errors encountered. Beginning file transfer...\n");
@@ -125,11 +125,11 @@ extern "C" {
 		return;
 	}
 
-	__declspec(dllexport) int DownloadImage(char imageName[]) {
+	__declspec(dllexport) int DownloadImage(char imageName[], long len) {
 		int instruction, received;
 		FILE* file;
 		long fileLength, bytesRead, totalRead;
-		char buffer[BUFFER_SIZE + 1];
+		unsigned char buffer[BUFFER_SIZE + 1];
 
 		/*Request for image transfer*/
 		instruction = 2;
@@ -139,7 +139,12 @@ extern "C" {
 		send(clientSocket, (char*)&instruction, sizeof(long), 0);
 		printf("Instruction sent successfully\n");
 
+		imageName[len] = 0;
+
 		send(clientSocket, imageName, 512, 0);
+
+		len = htonl(len);
+		send(clientSocket, (char*)&len, sizeof(long), 0);
 
 		/*Wait for confirmation*/
 		recv(clientSocket, (char*)&received, sizeof(long), 0);
@@ -176,22 +181,25 @@ extern "C" {
 		totalRead = 0;
 
 		/*Creating file or updating already existing one*/
-		file = fopen(imageName, "wb");
+		if ((file = fopen(imageName, "wb")) == NULL) {
+			printf("Error opening file. Aborting...");
+			return -10;
+		}
 
 		while (totalRead < fileLength) {
 			memset(buffer, 0, BUFFER_SIZE + 1);
-			bytesRead = recv(clientSocket, buffer, BUFFER_SIZE, 0);
+			bytesRead = recv(clientSocket, (char*)buffer, BUFFER_SIZE, 0);
 			if (bytesRead < 0)
 				break;
 			totalRead += bytesRead;
-			fwrite(buffer, bytesRead, 1, file);
+			fwrite(buffer, sizeof(char), bytesRead, file);
 		}
 		printf("File received successfully from the server\n");
 		fclose(file);
 		return 1;
 	}
 
-	__declspec(dllexport) int UploadImage(char imageName[]) {
+	__declspec(dllexport) int UploadImage(char imageName[], long len) {
 		long instruction;
 		long fileLength, bytesSent, totalSent, bytesRead;
 		FILE* file;
@@ -205,6 +213,8 @@ extern "C" {
 		/*Send instruction to the server*/
 		send(clientSocket, (char*)&instruction, sizeof(long), 0);
 		printf("Instruction sent successfully\n");
+		
+		imageName[len] = 0;
 
 		if (stat(imageName, &fileinfo) < 0)
 		{
@@ -221,7 +231,7 @@ extern "C" {
 			instruction = -1;
 			instruction = htonl(instruction);
 			send(clientSocket, (char*)&instruction, sizeof(long), 0);
-			return -1;
+			return -2;
 		}
 
 		/*Send information that no errors were encountered*/
@@ -235,18 +245,26 @@ extern "C" {
 
 		if (send(clientSocket, (char*)&fileLength, sizeof(long), 0) != sizeof(long)) {
 			printf("Error while sending file size information\n");
-			return -1;
+			return -3;
 		}
 
 		send(clientSocket, imageName, 512, 0);
 
+		len = htonl(len);
+		send(clientSocket, (char*)&len, sizeof(long), 0);
+
 		fileLength = fileinfo.st_size;
 		totalSent = 0;
-		file = fopen(imageName, "rb");
+		if ((file = fopen(imageName, "rb")) == NULL) {
+			printf("Cannot open file, aborting");
+			return -10;
+		}
+
 		buffer[0] = 0;
 
 		while (totalSent < fileLength) {
-			bytesRead = fread(buffer, 1, 1024, file);
+			memset(buffer, 0, BUFFER_SIZE);
+			bytesRead = fread(buffer, 1, BUFFER_SIZE, file);
 			bytesSent = send(clientSocket, (char*)buffer, bytesRead, 0);
 			if (bytesRead != bytesSent) {
 				break;
@@ -257,12 +275,13 @@ extern "C" {
 
 		if (totalSent == fileLength) {
 			printf("File has been sent successfully\n");
+			fclose(file);
 			return 1;
 		}
 		else {
 			printf("Error while sending file\n");
 			fclose(file);
-			return -1;
+			return -9;
 		}
 	}
 
@@ -274,7 +293,9 @@ extern "C" {
 		FILE* file;
 		struct stat fileinfo;
 		unsigned char buffer[BUFFER_SIZE];
-		char receiveBuffer[BUFFER_SIZE + 1];
+		unsigned char receiveBuffer[BUFFER_SIZE + 1];
+		char fileName[512];
+		long len;
 
 		/*Keep handling client connection on separate thread until given termination signal*/
 		while (handleConnection) {
@@ -289,7 +310,7 @@ extern "C" {
 			switch (instruction) {
 			case 1:
 				/*Request for file list transfer*/
-				printf("Thread: Received request for file list transfer, beginning...\n");		
+				printf("Thread: Received request for file list transfer, beginning...\n");
 
 				filename[0] = 0;
 				sprintf(filename, "%s", "catlist.txt");
@@ -332,7 +353,8 @@ extern "C" {
 				buffer[0] = 0;
 
 				while (totalSent < fileLength) {
-					bytesRead = fread(buffer, 1, 1024, file);
+					memset(buffer, 0, BUFFER_SIZE);
+					bytesRead = fread(buffer, 1, BUFFER_SIZE, file);
 					bytesSent = send(clientsock, (char*)buffer, bytesRead, 0);
 					if (bytesRead != bytesSent) {
 						break;
@@ -355,9 +377,23 @@ extern "C" {
 
 				filename[0] = 0;
 				recv(clientsock, filename, 512, 0);
-				printf("Thread: Filename is: %s\n", filename);
 
-				if (stat(filename, &fileinfo) < 0)
+				len = 0;
+				recv(clientsock, (char*)&len, sizeof(long), 0);
+				len = ntohl(len);
+				printf("Thread: Received filename length, which is: %d\n", len);
+
+				fileName[0] = 0;
+
+				for (int i = 0; i < len; i++) {
+					fileName[i] = filename[i];
+				}
+
+				fileName[len] = 0;
+
+				printf("Thread: Filename is: %s\n", fileName);
+
+				if (stat(fileName, &fileinfo) < 0)
 				{
 					printf("Thread: cannot acquire file information\n");
 					instruction = 2;
@@ -391,11 +427,12 @@ extern "C" {
 
 				fileLength = fileinfo.st_size;
 				totalSent = 0;
-				file = fopen(filename, "rb");
+				file = fopen(fileName, "rb");
 				buffer[0] = 0;
 
 				while (totalSent < fileLength) {
-					bytesRead = fread(buffer, 1, 1024, file);
+					memset(buffer, 0, BUFFER_SIZE);
+					bytesRead = fread(buffer, 1, BUFFER_SIZE, file);
 					bytesSent = send(clientsock, (char*)buffer, bytesRead, 0);
 					if (bytesRead != bytesSent) {
 						break;
@@ -414,7 +451,7 @@ extern "C" {
 				break;
 			case 3:
 				/*Request for image upload*/
-				printf("Thread: Received request for image transfer, beginning...\n");
+				printf("Thread: Received request for image upload, beginning...\n");
 
 				/*Awaiting confirmation before receiving file*/
 				instruction = 0;
@@ -422,6 +459,7 @@ extern "C" {
 				instruction = ntohl(instruction);
 
 				if (instruction != 1) {
+					printf("Thread: An error has occurred on client part. Aborting operation...");
 					continue;
 				}
 
@@ -430,13 +468,17 @@ extern "C" {
 					printf("Error has occured while receiving filelist size\n");
 					continue;
 				}
-				fileLength = ntohl(fileLength);
-				printf("Thread: length of file: %d\n", fileLength);
+				fileLength = ntohl(fileLength );
+				printf("Thread: length of file to receive is: %d\n", fileLength);
 
 				/*Acquiring filename*/
 				filename[0] = 0;
+				len = 0;
 				recv(clientsock, filename, 512, 0);
-				printf("Thread: filename: %s\n", filename);
+				recv(clientsock, (char*)&len, sizeof(long), 0);
+				len = ntohl(len);
+				filename[len] = 0;
+				printf("Thread: filename of the receiving file is: %s\n", filename);
 
 				/*Creating file or updating already existing one*/
 				file = fopen(filename, "wb");
@@ -445,18 +487,30 @@ extern "C" {
 
 				while (totalRead < fileLength) {
 					memset(receiveBuffer, 0, BUFFER_SIZE + 1);
-					bytesRead = recv(clientsock, receiveBuffer, BUFFER_SIZE, 0);
+					bytesRead = recv(clientsock, (char*)receiveBuffer, BUFFER_SIZE, 0);
 					if (bytesRead < 0)
 						break;
 					totalRead += bytesRead;
+					printf("Thread: Received %d bytes\n", totalRead);
 					fwrite(receiveBuffer, bytesRead, 1, file);
 				}
-				printf("File received successfully from the server\n");
+				printf("File download successfully from the client\n");
+				fclose(file);
+
+				/*Update the filelist*/
+				file = fopen("catlist.txt", "a+");
+				fprintf(file, "%c", '\n');
+				fprintf(file, "%s", filename);
 				fclose(file);
 				break;
 			case 99:
 				/*Termination signal*/
 				printf("Thread: Termination signal from client received, closing connection\n");
+				return;
+				break;
+			default:
+				/*Unknown instruction*/
+				printf("Thread: Unknown signal received. Closing client connection\n");
 				return;
 				break;
 			}
@@ -527,7 +581,7 @@ extern "C" {
 		return;
 	}
 
-	__declspec(dllexport) int BeginClientOperation(char host[], int port) {
+	__declspec(dllexport) int BeginClientOperation(char host[], int port, int hostLen) {
 		isClientRunning = TRUE;
 
 		if (connectionEstablished) {
@@ -551,6 +605,7 @@ extern "C" {
 		}
 
 		/*Find host destination*/
+		host[hostLen] = 0;
 		he = gethostbyname(host);
 
 		/*Preparing sockaddr_in structure for socket*/
